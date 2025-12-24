@@ -1,25 +1,14 @@
 `timescale 1ns / 1ns
 
 module Pipeline_top(
-    input clk,
-    input rst, // Active Low Master Reset
-
-    // IMEM write interface (from Instruction Loader)
-    input            imem_we,
-    input  [31:0]    imem_waddr,
-    input  [31:0]    imem_wdata,
-    input            loader_done_in,
-
-    // Result Output
-    output [31:0]    ResultW_out,
-
-
-    // Direct ECC Error Reporting Ports
-    output           s_err_imem, // Single Error in Instruction Memory
-    output           d_err_imem, // Double Error in Instruction Memory
-    output           s_err_dmem, // Single Error in Data Memory
-    output           d_err_dmem,  // Double Error in Data Memory
-    output           hardware_fault_flag
+    input clk, rst,
+    input imem_we,
+    input [31:0] imem_waddr, imem_wdata,
+    input loader_done_in,
+    input test_en_in,               // Top-level BIST control 
+    output [31:0] ResultW_out,
+    output s_err_imem, d_err_imem, s_err_dmem, d_err_dmem,
+    output hardware_fault_flag 
 );
 
     // --- Internal Wire Declarations ---
@@ -40,14 +29,14 @@ module Pipeline_top(
     // Internal ECC Error Wires
     wire s_err_i, d_err_i, s_err_d, d_err_d;
 
-  // Assign internal wires directly to top-level output ports
+    // Output Assignments
     assign s_err_imem = s_err_i;
     assign d_err_imem = d_err_i;
     assign s_err_dmem = s_err_d;
     assign d_err_dmem = d_err_d;
-assign ResultW_out = ResultW;
+    assign ResultW_out = ResultW;
+
     // --- 1. PC Control Mux ---
-    // The Mux provides the next PC, but fetch_cycle handles the StallF
     Mux PC_Selector (
         .a(PCPlus4D), 
         .b(PCTargetE), 
@@ -58,7 +47,7 @@ assign ResultW_out = ResultW;
     // --- 2. Fetch Stage ---
     fetch_cycle fetch (
         .clk(clk), 
-        .rst(rst & ~StallF), // Combined reset and stall logic
+        .rst(rst & ~StallF),
         .PC_Next_In(PC_Next), 
         .imem_we(imem_we), 
         .imem_waddr(imem_waddr), 
@@ -74,7 +63,7 @@ assign ResultW_out = ResultW;
     // --- 3. Decode Stage ---
     decode_cycle decode (
         .clk(clk), 
-        .rst(rst & ~StallD), // StallD freezes the Fetch/Decode pipeline register
+        .rst(rst & ~StallD),
         .InstrD(InstrD), 
         .PCD(PCD), 
         .PCPlus4D(PCPlus4D), 
@@ -95,39 +84,24 @@ assign ResultW_out = ResultW;
         .PCPlus4E(PCPlus4E),
         .RS1_E(RS1_E), 
         .RS2_E(RS2_E),
-        .RS1_D(RS1_D), // Added for Hazard Unit
-        .RS2_D(RS2_D)  // Added for Hazard Unit
+        .RS1_D(RS1_D), 
+        .RS2_D(RS2_D)  
     );
 
-    // --- 4. Execute Stage ---
+    // --- 4. Execute Stage (Updated for BIST) ---
     execute_cycle execute (
-        .clk(clk), 
-        .rst(rst & ~FlushE), // FlushE clears the Decode/Execute register for stalls
-        .RegWriteE(RegWriteE), 
-        .ALUSrcE(ALUSrcE), 
-        .MemWriteE(MemWriteE), 
-        .ResultSrcE(ResultSrcE), 
-        .BranchE(BranchE), 
-        .ALUControlE(ALUControlE), 
-        .RD1_E(RD1_E), 
-        .RD2_E(RD2_E), 
-        .Imm_Ext_E(Imm_Ext_E), 
-        .RD_E(RD_E), 
-        .PCE(PCE), 
-        .PCPlus4E(PCPlus4E), 
-        .PCSrcE(PCSrcE), 
-        .PCTargetE(PCTargetE), 
-        .RegWriteM(RegWriteM), 
-        .MemWriteM(MemWriteM), 
-        .ResultSrcM(ResultSrcM), 
-        .RD_M(RD_M), 
-        .PCPlus4M(PCPlus4M), 
-        .WriteDataM(WriteDataM), 
-        .ALU_ResultM(ALU_ResultM), 
-        .ResultW(ResultW), 
-        .ForwardA_E(ForwardAE), 
-        .ForwardB_E(ForwardBE),
+        .clk(clk), .rst(rst & ~FlushE),
+        .RegWriteE(RegWriteE), .ALUSrcE(ALUSrcE), .MemWriteE(MemWriteE), 
+        .ResultSrcE(ResultSrcE), .BranchE(BranchE), .ALUControlE(ALUControlE), 
+        .RD1_E(RD1_E), .RD2_E(RD2_E), .Imm_Ext_E(Imm_Ext_E), .RD_E(RD_E), 
+        .PCE(PCE), .PCPlus4E(PCPlus4E), .PCSrcE(PCSrcE), .PCTargetE(PCTargetE), 
+        .RegWriteM(RegWriteM), .MemWriteM(MemWriteM), .ResultSrcM(ResultSrcM), 
+        .RD_M(RD_M), .PCPlus4M(PCPlus4M), .WriteDataM(WriteDataM), 
+        .ALU_ResultM(ALU_ResultM), .ResultW(ResultW), 
+        .ForwardA_E(ForwardAE), .ForwardB_E(ForwardBE),
         .ALU_ResultM_In(ALU_ResultM),
+        
+        .test_en_in(test_en_in),    // Matches execute_cycle port name
         .hardware_fault_flag(hardware_fault_flag)
     );
     
@@ -168,13 +142,13 @@ assign ResultW_out = ResultW;
         .rst(rst), 
         .RegWriteM(RegWriteM), 
         .RegWriteW(RegWriteW), 
-        .ResultSrcM(ResultSrcM), // Added to detect LW
+        .ResultSrcM(ResultSrcM), 
         .RD_M(RD_M), 
         .RD_W(RDW), 
         .Rs1_E(RS1_E), 
         .Rs2_E(RS2_E), 
-        .Rs1_D(RS1_D), // Added for stall detection
-        .Rs2_D(RS2_D), // Added for stall detection
+        .Rs1_D(RS1_D), 
+        .Rs2_D(RS2_D), 
         .ForwardAE(ForwardAE), 
         .ForwardBE(ForwardBE),
         .StallF(StallF),

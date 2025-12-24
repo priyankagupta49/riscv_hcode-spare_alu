@@ -10,87 +10,94 @@ module execute_cycle(
     input [31:0] ResultW,
     input [1:0] ForwardA_E, ForwardB_E,
     input [31:0] ALU_ResultM_In, 
+    input test_en_in,              
 
     output PCSrcE, RegWriteM, MemWriteM, ResultSrcM,
     output [4:0] RD_M,
     output [31:0] PCPlus4M, WriteDataM, ALU_ResultM,
     output [31:0] PCTargetE,
-    output reg hardware_fault_flag // Signal to top level that reconfiguration occurred
+    output reg hardware_fault_flag 
 );
 
+    // Internal Wires
     wire [31:0] Src_A, Src_B_interim, Src_B;
     wire [31:0] ResultE_Primary, ResultE_Spare, Final_ResultE;
     wire ZeroE_P, ZeroE_S, Final_ZeroE;
+    wire Carry_P;
     
-    // Fault Signal from Primary ALU
-    wire primary_alu_fault;
-    reg use_spare;
+    // Test Controller and BIST Signals
+    reg [15:0] test_timer;   
+    reg [2:0]  test_counter; 
+    reg        internal_test_en;   
+    wire       test_en;            
+    wire       bist_fault_detected;
+    wire       use_spare_mux;
 
-    // 1. Source A Mux
-    Mux_3_by_1 srca_mux (
-        .a(RD1_E), .b(ResultW), .c(ALU_ResultM_In),
-        .s(ForwardA_E), .d(Src_A)
-    );
+    assign test_en = test_en_in | internal_test_en;
 
-    // 2. Source B Interim Mux
-    Mux_3_by_1 srcb_mux (
-        .a(RD2_E), .b(ResultW), .c(ALU_ResultM_In),
-        .s(ForwardB_E), .d(Src_B_interim)
-    );
+    // 1. Source Muxes
+    Mux_3_by_1 srca_mux (.a(RD1_E), .b(ResultW), .c(ALU_ResultM_In), .s(ForwardA_E), .d(Src_A));
+    Mux_3_by_1 srcb_mux (.a(RD2_E), .b(ResultW), .c(ALU_ResultM_In), .s(ForwardB_E), .d(Src_B_interim));
+    Mux alu_src_mux (.a(Src_B_interim), .b(Imm_Ext_E), .s(ALUSrcE), .c(Src_B));
 
-    // 3. ALU Source B Mux
-    Mux alu_src_mux (
-        .a(Src_B_interim), .b(Imm_Ext_E),
-        .s(ALUSrcE), .c(Src_B)
-    );
-
-    // 4. MODULE-LEVEL REPLACEMENT: Dual ALU Instantiation
-    
-    // Primary ALU (Equipped with Fault Detection/BIST)
-    // In a real implementation, this unit includes parity or residue checkers
- // Primary ALU
-    ALU_ft primary_alu (
-    .clk(clk), .rst(rst),
-        .A(Src_A), .B(Src_B), .ALUControl(ALUControlE),
-        .Result(ResultE_Primary), 
-        .Zero(ZeroE_P),
-        .Carry(Carry_P),        // Ensure these wires are declared
-        .OverFlow(OverFlow_P),
-        .Negative(Negative_P),
-        .force_alu_fault(1'b0), // Primary doesn't need to force itself
-        .fault_detected_out(primary_alu_fault) // FIX: Match port name in ALU_ft
-    );
-
-    // Spare ALU (The redundant unit)
-    ALU_ft spare_alu (
-    .clk(clk), .rst(rst),
-        .A(Src_A), .B(Src_B), .ALUControl(ALUControlE),
-        .Result(ResultE_Spare), .Zero(ZeroE_S)
-        // Spare doesn't need a checker to save area
-    );
-
-    // 5. DYNAMIC RECONFIGURATION LOGIC
-    // This block "remembers" if the primary unit ever failed
+    // 2. TEST CONTROLLER (Mixed-Operation BIST Trigger)
+    // This block manages the timing for both the Primary ALU and the ORA
     always @(posedge clk) begin
         if (rst == 1'b0) begin
-            use_spare <= 1'b0;
-            hardware_fault_flag <= 1'b0;
-        end else if (primary_alu_fault) begin
-            use_spare <= 1'b1;         // Latch the reconfiguration
-            hardware_fault_flag <= 1'b1;
+            test_timer       <= 16'b0;
+            test_counter     <= 3'b0;
+            internal_test_en <= 1'b0;
+        end else if (!hardware_fault_flag) begin 
+            if (!internal_test_en) begin
+                test_timer <= test_timer + 1;
+                if (test_timer == 16'hFFFF) internal_test_en <= 1'b1;
+            end else begin
+                test_counter <= test_counter + 1;
+                if (test_counter == 3'd7) begin 
+                    internal_test_en <= 1'b0;
+                    test_timer       <= 16'b0;
+                end
+            end
         end
     end
 
-    // Routing Multiplexers: Choose result based on reconfiguration state
-    assign Final_ResultE = (use_spare) ? ResultE_Spare : ResultE_Primary;
-    assign Final_ZeroE   = (use_spare) ? ZeroE_S : ZeroE_P;
-
-    // 6. Branch Target Adder
-    PC_Adder branch_adder (
-        .a(PCE), .b(Imm_Ext_E), .c(PCTargetE)
+    // 3. INTEGRATED BIST_LUT (Output Response Analyzer)
+    BIST_LUT alu_checker (
+        .clk(clk), .rst(rst),
+        .test_en(test_en),
+        .test_counter(test_counter),
+        .primary_res(ResultE_Primary),
+        .primary_carry(Carry_P),
+        .fault_detected(bist_fault_detected),
+        .mux_sel(use_spare_mux)
     );
 
-    // 7. EX/MEM Pipeline Registers
+    always @(*) hardware_fault_flag = bist_fault_detected;
+
+    // 4. MODULE-LEVEL REPLACEMENT (Hot-Standby)
+    ALU_ft primary_alu (
+        .clk(clk), .rst(rst),
+        .A(Src_A), .B(Src_B), .ALUControl(ALUControlE),
+        .test_en(test_en), 
+        .test_counter(test_counter), // Passing the centrally managed counter
+        .Result(ResultE_Primary), .Carry(Carry_P), .Zero(ZeroE_P),
+        .force_alu_fault(1'b0), .fault_detected_out() 
+    );
+
+    ALU_ft spare_alu (
+        .clk(clk), .rst(rst),
+        .A(Src_A), .B(Src_B), .ALUControl(ALUControlE),
+        .test_en(1'b0), 
+        .test_counter(3'b000),       // Spare is not in test mode, keep counter 0
+        .Result(ResultE_Spare), .Zero(ZeroE_S)
+    );
+
+    // 5. RECONFIGURATION MUX 
+    wire final_mux_control = use_spare_mux | test_en; 
+    assign Final_ResultE = (final_mux_control) ? ResultE_Spare : ResultE_Primary;
+    assign Final_ZeroE   = (final_mux_control) ? ZeroE_S : ZeroE_P;
+
+    // 6. Pipeline Registers
     reg RegWriteM_r, MemWriteM_r, ResultSrcM_r;
     reg [4:0] RD_M_r;
     reg [31:0] PCPlus4M_r, WriteDataM_r, ALU_ResultM_r;
@@ -100,24 +107,17 @@ module execute_cycle(
             RegWriteM_r <= 1'b0; MemWriteM_r <= 1'b0; ResultSrcM_r <= 1'b0;
             RD_M_r <= 5'b0; PCPlus4M_r <= 32'b0; WriteDataM_r <= 32'b0; ALU_ResultM_r <= 32'b0;
         end else begin
-            RegWriteM_r <= RegWriteE;
-            MemWriteM_r <= MemWriteE;
-            ResultSrcM_r <= ResultSrcE;
-            RD_M_r <= RD_E;
-            PCPlus4M_r <= PCPlus4E;
-            WriteDataM_r <= Src_B_interim; 
-            ALU_ResultM_r <= Final_ResultE; // Using the selected (Primary or Spare) result
+            RegWriteM_r <= RegWriteE; MemWriteM_r <= MemWriteE; ResultSrcM_r <= ResultSrcE;
+            RD_M_r <= RD_E; PCPlus4M_r <= PCPlus4E; WriteDataM_r <= Src_B_interim; 
+            ALU_ResultM_r <= Final_ResultE; 
         end
     end
 
-    // Final Outputs
+    PC_Adder branch_adder (.a(PCE), .b(Imm_Ext_E), .c(PCTargetE));
     assign PCSrcE = Final_ZeroE & BranchE;
-    assign RegWriteM = RegWriteM_r;
-    assign MemWriteM = MemWriteM_r;
-    assign ResultSrcM = ResultSrcM_r;
-    assign RD_M = RD_M_r;
-    assign PCPlus4M = PCPlus4M_r;
-    assign WriteDataM = WriteDataM_r;
+    assign RegWriteM = RegWriteM_r; assign MemWriteM = MemWriteM_r;
+    assign ResultSrcM = ResultSrcM_r; assign RD_M = RD_M_r;
+    assign PCPlus4M = PCPlus4M_r; assign WriteDataM = WriteDataM_r;
     assign ALU_ResultM = ALU_ResultM_r;
 
 endmodule
