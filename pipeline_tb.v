@@ -125,4 +125,152 @@ module tb_pipeline_time_redundancy();
         $finish;
     end
 
+
+endmodule
+
+
+
+////***
+`timescale 1ns / 1ps
+
+module tb_pipeline_time_redundancy;
+
+    // --------------------------------------------------
+    // Clock and Reset
+    // --------------------------------------------------
+    reg clk = 0;
+    reg rst = 0;
+    always #5 clk = ~clk;   // 100 MHz
+
+    // --------------------------------------------------
+    // Loader Inputs
+    // --------------------------------------------------
+    reg [11:0] operand1, operand2;
+    reg [2:0]  opcode;
+
+    // --------------------------------------------------
+    // Wires
+    // --------------------------------------------------
+    wire [31:0] imem_waddr, imem_wdata;
+    wire        imem_we;
+    wire        done_signal;
+
+    wire [31:0] result_w;
+    wire        alu_fault_detected;
+
+    // --------------------------------------------------
+    // VERIFIED HIERARCHY MACROS
+    // --------------------------------------------------
+    `define ALU_FT    dut.execute.time_redundant_alu
+    `define ALU_CORE  dut.execute.time_redundant_alu.u_alu
+    `define REG_FILE dut.decode.rf.Register
+
+    // --------------------------------------------------
+    // Instruction Loader
+    // --------------------------------------------------
+    instr_loader loader (
+        .clk(clk),
+        .rst(rst),
+        .op1(operand1),
+        .op2(operand2),
+        .alu_op(opcode),
+        .imem_we(imem_we),
+        .imem_addr(imem_waddr),
+        .imem_wdata(imem_wdata),
+        .done(done_signal)
+    );
+
+    // --------------------------------------------------
+    // Pipeline DUT
+    // --------------------------------------------------
+    Pipeline_top dut (
+        .clk(clk),
+        .rst(rst),
+        .imem_we(imem_we),
+        .imem_waddr(imem_waddr),
+        .imem_wdata(imem_wdata),
+        .loader_done_in(done_signal),
+        .ResultW_out(result_w),
+        .hardware_fault_flag(alu_fault_detected)
+    );
+
+    // ==================================================
+    // MAIN TEST
+    // ==================================================
+    initial begin
+
+        // --------------------------------------------------
+        // Reset & Program Load
+        // --------------------------------------------------
+        rst = 0;
+        operand1 = 12'd10;
+        operand2 = 12'd8;
+        opcode   = 3'b000;   // ADD
+        #20 rst = 1;
+
+        wait (done_signal);
+        $display("\n--- PROGRAM LOADED ---");
+
+        // --------------------------------------------------
+        // DISPLAY TIME-REDUNDANT ALU STAGES
+        // --------------------------------------------------
+        $display("\n--- TIME REDUNDANT ALU STAGES ---");
+
+        // ---- Time Stage 1 ----
+        wait (`ALU_FT.state == 2'b00);
+        @(posedge clk);
+        #1;
+        $display("ALU Time Stage T1 Result : %0d", `ALU_FT.res_t1);
+
+        // ---- Time Stage 2 ----
+        wait (`ALU_FT.state == 2'b01);
+        @(posedge clk);
+           force `ALU_CORE.Result = ~`ALU_CORE.Result;
+        #1;
+        $display("ALU Time Stage T2 Result : %0d", `ALU_FT.res_t2);
+
+        // --------------------------------------------------
+        // Inject transient ALU fault (during T2)
+        // --------------------------------------------------
+        $display("\n--- Injecting Transient ALU Fault ---");
+//        force `ALU_CORE.Result = ~`ALU_CORE.Result;
+        @(posedge clk);
+        release `ALU_CORE.Result;
+
+        // ---- Time Stage 3 (Voted Result) ----
+        wait (`ALU_FT.state == 2'b10);
+        @(posedge clk);
+        #1;
+        $display("ALU Time Stage T3 Result : %0d", `ALU_FT.Result);
+
+        // --------------------------------------------------
+        // WAIT FOR ARCHITECTURAL COMMIT
+        // --------------------------------------------------
+        wait (`REG_FILE[11] == 32'd18);
+        #1;
+        $display("\nWriteback Result (Recovered): %0d", `REG_FILE[11]);
+
+        // --------------------------------------------------
+        // Memory ECC Fault Injection
+        // --------------------------------------------------
+        #100;
+        wait (dut.memory.MemWriteM);
+        #20;
+        dut.memory.dmem.mem[1][7] = ~dut.memory.dmem.mem[1][7];
+        $display("Memory bit flipped");
+
+        // --------------------------------------------------
+        // Final Report
+        // --------------------------------------------------
+        #50;
+        $display("\n=========== FINAL REPORT ===========");
+        $display("Register x9  (Op1): %0d", `REG_FILE[9]);
+        $display("Register x10 (Op2): %0d", `REG_FILE[10]);
+        $display("Register x11 (Result): %0d", `REG_FILE[11]);
+        $display("ALU Fault Flag: %b", alu_fault_detected);
+        $display("===================================");
+
+        $finish;
+    end
+
 endmodule
