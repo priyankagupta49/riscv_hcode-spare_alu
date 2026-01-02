@@ -5,92 +5,64 @@ module Pipeline_top(
     input imem_we,
     input [31:0] imem_waddr, imem_wdata,
     input loader_done_in,
-    input test_en_in,               // Top-level BIST control 
+    
     output [31:0] ResultW_out,
     output s_err_imem, d_err_imem, s_err_dmem, d_err_dmem,
     output hardware_fault_flag 
 );
 
-    // --- Internal Wire Declarations ---
+    // --- Internal Wires ---
     wire PCSrcE, RegWriteW, RegWriteE, ALUSrcE, MemWriteE, ResultSrcE, BranchE;
     wire RegWriteM, MemWriteM, ResultSrcM, ResultSrcW;
     wire [2:0] ALUControlE;
     wire [4:0] RD_E, RD_M, RDW, RS1_E, RS2_E, RS1_D, RS2_D;
-    
     wire [31:0] PC_Next, PCTargetE, InstrD, PCD, PCPlus4D, ResultW;
     wire [31:0] RD1_E, RD2_E, Imm_Ext_E, PCE, PCPlus4E, PCPlus4M;
     wire [31:0] WriteDataM, ALU_ResultM, PCPlus4W, ALU_ResultW, ReadDataW;
-    
     wire [1:0] ForwardAE, ForwardBE;
     
-    // Hazard Unit Control Signals
+    // Control Signals from Hazard Unit
     wire StallF, StallD, FlushE;
-
-    // Internal ECC Error Wires
-    wire s_err_i, d_err_i, s_err_d, d_err_d;
+    
+    // Time Redundancy Stall Signal
+    wire ALU_Busy_Stall;
 
     // Output Assignments
-    assign s_err_imem = s_err_i;
-    assign d_err_imem = d_err_i;
-    assign s_err_dmem = s_err_d;
-    assign d_err_dmem = d_err_d;
     assign ResultW_out = ResultW;
 
-    // --- 1. PC Control Mux ---
+    // --- 1. PC Selector ---
     Mux PC_Selector (
-        .a(PCPlus4D), 
-        .b(PCTargetE), 
-        .s(PCSrcE), 
-        .c(PC_Next) 
+        .a(PCPlus4D), .b(PCTargetE), .s(PCSrcE), .c(PC_Next)
     );
 
     // --- 2. Fetch Stage ---
+    // StallF prevents the PC from incrementing
     fetch_cycle fetch (
-        .clk(clk), 
-        .rst(rst & ~StallF),
-        .PC_Next_In(PC_Next), 
-        .imem_we(imem_we), 
-        .imem_waddr(imem_waddr), 
-        .imem_wdata(imem_wdata),
-        .loader_done_in(loader_done_in),
-        .s_err(s_err_i), 
-        .d_err(d_err_i),
-        .InstrD(InstrD), 
-        .PCPlus4D(PCPlus4D), 
-        .PCD(PCD) 
+        .clk(clk), .rst(rst),
+        .PC_Next_In(PC_Next), .imem_we(imem_we), 
+        .imem_waddr(imem_waddr), .imem_wdata(imem_wdata),
+        .loader_done_in(loader_done_in & !StallF), // Stalls PC when Hazard Unit says so
+        .s_err(s_err_imem), .d_err(d_err_imem),
+        .InstrD(InstrD), .PCPlus4D(PCPlus4D), .PCD(PCD)
     );
 
     // --- 3. Decode Stage ---
+    // StallD prevents the IF/ID pipeline register from updating
     decode_cycle decode (
-        .clk(clk), 
-        .rst(rst & ~StallD),
-        .InstrD(InstrD), 
-        .PCD(PCD), 
-        .PCPlus4D(PCPlus4D), 
-        .RegWriteW(RegWriteW), 
-        .RDW(RDW), 
-        .ResultW(ResultW), 
-        .RegWriteE(RegWriteE), 
-        .ALUSrcE(ALUSrcE), 
-        .MemWriteE(MemWriteE), 
-        .ResultSrcE(ResultSrcE),
-        .BranchE(BranchE), 
-        .ALUControlE(ALUControlE), 
-        .RD1_E(RD1_E), 
-        .RD2_E(RD2_E), 
-        .Imm_Ext_E(Imm_Ext_E), 
-        .RD_E(RD_E), 
-        .PCE(PCE), 
-        .PCPlus4E(PCPlus4E),
-        .RS1_E(RS1_E), 
-        .RS2_E(RS2_E),
-        .RS1_D(RS1_D), 
-        .RS2_D(RS2_D)  
+        .clk(clk), .rst(rst),
+        .InstrD(InstrD), .PCD(PCD), .PCPlus4D(PCPlus4D), 
+        .RegWriteW(RegWriteW), .RDW(RDW), .ResultW(ResultW), 
+        .RegWriteE(RegWriteE), .ALUSrcE(ALUSrcE), .MemWriteE(MemWriteE), 
+        .ResultSrcE(ResultSrcE), .BranchE(BranchE), .ALUControlE(ALUControlE), 
+        .RD1_E(RD1_E), .RD2_E(RD2_E), .Imm_Ext_E(Imm_Ext_E), 
+        .RD_E(RD_E), .PCE(PCE), .PCPlus4E(PCPlus4E),
+        .RS1_E(RS1_E), .RS2_E(RS2_E), .RS1_D(RS1_D), .RS2_D(RS2_D)
+        // Inside decode_cycle, ensure the registers only update if !StallD
     );
 
-    // --- 4. Execute Stage (Updated for BIST) ---
+    // --- 4. Execute Stage ---
     execute_cycle execute (
-        .clk(clk), .rst(rst & ~FlushE),
+        .clk(clk), .rst(rst),
         .RegWriteE(RegWriteE), .ALUSrcE(ALUSrcE), .MemWriteE(MemWriteE), 
         .ResultSrcE(ResultSrcE), .BranchE(BranchE), .ALUControlE(ALUControlE), 
         .RD1_E(RD1_E), .RD2_E(RD2_E), .Imm_Ext_E(Imm_Ext_E), .RD_E(RD_E), 
@@ -100,60 +72,38 @@ module Pipeline_top(
         .ALU_ResultM(ALU_ResultM), .ResultW(ResultW), 
         .ForwardA_E(ForwardAE), .ForwardB_E(ForwardBE),
         .ALU_ResultM_In(ALU_ResultM),
-        
-        .test_en_in(test_en_in),    // Matches execute_cycle port name
-        .hardware_fault_flag(hardware_fault_flag)
+        .fault_detected_out(hardware_fault_flag)
     );
-    
-    // --- 5. Memory Stage ---
+
+    // Extract ALU Status for the Hazard Unit
+    assign ALU_Busy_Stall = (execute.time_redundant_alu.state != 2'b00);
+
+    // --- 5. Memory & Writeback Stage (Remaining same) ---
     memory_cycle memory (
-        .clk(clk), 
-        .rst(rst), 
-        .RegWriteM(RegWriteM), 
-        .MemWriteM(MemWriteM), 
-        .ResultSrcM(ResultSrcM), 
-        .RD_M(RD_M), 
-        .PCPlus4M(PCPlus4M), 
-        .WriteDataM(WriteDataM), 
-        .ALU_ResultM(ALU_ResultM), 
-        .RegWriteW(RegWriteW), 
-        .ResultSrcW(ResultSrcW), 
-        .RD_W(RDW), 
-        .PCPlus4W(PCPlus4W), 
-        .ALU_ResultW(ALU_ResultW), 
-        .ReadDataW(ReadDataW),
-        .s_err(s_err_d), 
-        .d_err(d_err_d)
+        .clk(clk), .rst(rst), .RegWriteM(RegWriteM), .MemWriteM(MemWriteM), 
+        .ResultSrcM(ResultSrcM), .RD_M(RD_M), .PCPlus4M(PCPlus4M), 
+        .WriteDataM(WriteDataM), .ALU_ResultM(ALU_ResultM), .RegWriteW(RegWriteW), 
+        .ResultSrcW(ResultSrcW), .RD_W(RDW), .PCPlus4W(PCPlus4W), 
+        .ALU_ResultW(ALU_ResultW), .ReadDataW(ReadDataW),
+        .s_err(s_err_dmem), .d_err(d_err_dmem)
     );
 
-    // --- 6. Write Back Stage ---
     writeback_cycle writeBack (
-        .clk(clk), 
-        .rst(rst), 
-        .ResultSrcW(ResultSrcW), 
-        .PCPlus4W(PCPlus4W), 
-        .ALU_ResultW(ALU_ResultW), 
-        .ReadDataW(ReadDataW), 
-        .ResultW(ResultW)
+        .clk(clk), .rst(rst), .ResultSrcW(ResultSrcW), .PCPlus4W(PCPlus4W), 
+        .ALU_ResultW(ALU_ResultW), .ReadDataW(ReadDataW), .ResultW(ResultW)
     );
 
-    // --- 7. Hazard Unit ---
+    // --- 6. Updated Hazard Unit ---
+    // Now receives the ALU_Busy_Stall to manage pipeline flow
     hazard_unit Forwarding_Block (
         .rst(rst), 
-        .RegWriteM(RegWriteM), 
-        .RegWriteW(RegWriteW), 
+        .RegWriteM(RegWriteM), .RegWriteW(RegWriteW), 
         .ResultSrcM(ResultSrcM), 
-        .RD_M(RD_M), 
-        .RD_W(RDW), 
-        .Rs1_E(RS1_E), 
-        .Rs2_E(RS2_E), 
-        .Rs1_D(RS1_D), 
-        .Rs2_D(RS2_D), 
-        .ForwardAE(ForwardAE), 
-        .ForwardBE(ForwardBE),
-        .StallF(StallF),
-        .StallD(StallD),
-        .FlushE(FlushE)
+        .RD_M(RD_M), .RD_W(RDW), 
+        .Rs1_E(RS1_E), .Rs2_E(RS2_E), .Rs1_D(RS1_D), .Rs2_D(RS2_D), 
+        .ALU_Busy_Stall(ALU_Busy_Stall), // Added port
+        .ForwardAE(ForwardAE), .ForwardBE(ForwardBE),
+        .StallF(StallF), .StallD(StallD), .FlushE(FlushE)
     );
 
 endmodule
